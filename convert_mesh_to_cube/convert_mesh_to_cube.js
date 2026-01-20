@@ -1,263 +1,266 @@
+/**
+ * Convert Mesh to Cube - V8
+ * 
+ * 核心策略：找到每个方向上面积最大的三角形对，使用它们的 UV
+ * 因为原始 mesh 的一个面可能由多个三角形组成，映射到纹理的不同区域
+ * 我们选择覆盖面积最大的那对三角形的 UV
+ */
+
 let convert_button;
 
 Plugin.register('convert_mesh_to_cube', {
-	title: 'Convert Mesh to Cube',
-	author: 'MrXiaoM',
-	icon: 'fa-cube',
-	description: 'Convert mesh (that was converted from cube) back to cube.',
-	tags: [ 'Mesh', 'Cube', 'Tool' ],
-	version: '1.0.0',
-	variant: 'both',
-	onload() {
+    title: 'Convert Mesh to Cube',
+    author: 'MrXiaoM (V8)',
+    icon: 'fa-cube',
+    description: 'Convert mesh back to cube - uses largest triangle pair UV.',
+    tags: ['Mesh', 'Cube', 'Tool'],
+    version: '8.0.0',
+    variant: 'both',
+    onload() {
+        Language.addTranslations('en', {
+            "action.convert_mesh_to_cube": "Convert to Cube",
+            "action.convert_mesh_to_cube.desc": "Convert the selected elements into cubes",
+        });
+        Language.addTranslations('zh', {
+            "action.convert_mesh_to_cube": "转换成块",
+            "action.convert_mesh_to_cube.desc": "转换使选中的元素成块",
+        });
 
-		Language.addTranslations('en', {
-			"action.convert_mesh_to_cube": "Convert to Cube",
-			"action.convert_mesh_to_cube.desc": "Convert the selected elements into cubes",
-		})
-		Language.addTranslations('zh', {
-			"action.convert_mesh_to_cube": "转换成块",
-			"action.convert_mesh_to_cube.desc": "转换使选中的元素成块",
-		})
+        convert_button = new Action('convert_mesh_to_cube', {
+            icon: 'fa-cube',
+            category: 'edit',
+            condition: { modes: ['edit'], features: ['meshes'], method: () => (Mesh.selected.length) },
+            click() {
+                Undo.initEdit({ elements: [...Mesh.selected], outliner: true });
 
-		convert_button = new Action('convert_mesh_to_cube', {
-			icon: 'fa-cube',
-			category: 'edit',
-			condition: {modes: ['edit'], features: ['meshes'], method: () => (Mesh.selected.length)},
-			click() {
-				Undo.initEdit({elements: [...Mesh.selected], outliner: true});
+                // 浮点数比较的误差范围 / Epsilon for floating point comparison
+                const EPSILON = 1e-4;
+                function approxEqual(a, b) { return Math.abs(a - b) < EPSILON; }
+                
+                // 计算三角形在 3D 空间中的面积（使用叉积）
+                // Calculate triangle area in 3D space using cross product
+                function triangleArea3D(p1, p2, p3) {
+                    const ax = p2[0] - p1[0], ay = p2[1] - p1[1], az = p2[2] - p1[2];
+                    const bx = p3[0] - p1[0], by = p3[1] - p1[1], bz = p3[2] - p1[2];
+                    const cx = ay * bz - az * by;
+                    const cy = az * bx - ax * bz;
+                    const cz = ax * by - ay * bx;
+                    return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+                }
 
+                let new_cubes = [];
 
-///////////////// LLM generate started ////////////////////
+                Mesh.selected.forEach(mesh => {
+                    // 计算网格的边界框（AABB）/ Calculate mesh bounding box (AABB)
+                    let verticesCoords = Object.values(mesh.vertices);
+                    let minX = Infinity, maxX = -Infinity;
+                    let minY = Infinity, maxY = -Infinity;
+                    let minZ = Infinity, maxZ = -Infinity;
 
+                    verticesCoords.forEach(coord => {
+                        minX = Math.min(minX, coord[0]); maxX = Math.max(maxX, coord[0]);
+                        minY = Math.min(minY, coord[1]); maxY = Math.max(maxY, coord[1]);
+                        minZ = Math.min(minZ, coord[2]); maxZ = Math.max(maxZ, coord[2]);
+                    });
 
-function inverseAdjustFromAndToForInflateAndStretch(adjustedFrom, adjustedTo, cube) {
-	const stretch = Array.isArray(cube.stretch) ? cube.stretch : [cube.stretch, cube.stretch, cube.stretch];
-	const inflate = cube.inflate || 0;
-	for (let i = 0; i < 3; i++) {
-		// 1. 提取原始中心点（调整过程中不变）
-		const center = (adjustedFrom[i] + adjustedTo[i]) / 2;
-		// 2. 计算调整后的半长
-		const adjustedHalfSize = (adjustedTo[i] - adjustedFrom[i]) / 2;
-		// 3. 反向计算「膨胀+原始半长」（避免除以0，默认stretch=1）
-		const expandedHalfSize = adjustedHalfSize / (stretch[i] || 1);
-		// 4. 反向计算原始半长
-		const originalHalfSize = expandedHalfSize - inflate;
-		// 5. 还原原始from和to（直接修改入参，符合原函数的入参修改逻辑）
-		adjustedFrom[i] = center - originalHalfSize;
-		adjustedTo[i] = center + originalHalfSize;
-	}
-}
+                    // 定义六个面的检测器：检查顶点是否都在某个平面上
+                    // Define detectors for 6 faces: check if vertices are all on a plane
+                    const faceDetectors = {
+                        east: (coords) => coords.every(c => approxEqual(c[0], maxX)),
+                        west: (coords) => coords.every(c => approxEqual(c[0], minX)),
+                        up: (coords) => coords.every(c => approxEqual(c[1], maxY)),
+                        down: (coords) => coords.every(c => approxEqual(c[1], minY)),
+                        south: (coords) => coords.every(c => approxEqual(c[2], maxZ)),
+                        north: (coords) => coords.every(c => approxEqual(c[2], minZ))
+                    };
 
-let new_cubes = [];
-Mesh.selected.forEach(mesh => {
-    // 1. 创建Cube实例，继承Mesh的基础属性
-    let cube = new Cube({
-        name: mesh.name,
-        color: mesh.color,
-        origin: mesh.origin.slice(), // 复制原点（值类型）
-        rotation: [0, 0, 0], // 后续还原旋转
-        from: [0, 0, 0], // 后续通过逆函数计算
-        to: [0, 0, 0], // 后续通过逆函数计算
-        faces: {
-            east: { texture: null, uv: [0, 0, 1, 1], rotation: 0 },
-            west: { texture: null, uv: [0, 0, 1, 1], rotation: 0 },
-            up: { texture: null, uv: [0, 0, 1, 1], rotation: 0 },
-            down: { texture: null, uv: [0, 0, 1, 1], rotation: 0 },
-            south: { texture: null, uv: [0, 0, 1, 1], rotation: 0 },
-            north: { texture: null, uv: [0, 0, 1, 1], rotation: 0 }
-        }
-    });
+                    // 存储每个面的所有三角形 / Store all triangles for each face
+                    const faceTriangles = {
+                        north: [], south: [], east: [], west: [], up: [], down: []
+                    };
 
-    // 2. 还原旋转（严格反向原代码的旋转逻辑）
-    let rotation_euler = new THREE.Euler(0, 0, 0, 'XYZ')
-        .fromArray(mesh.rotation.map(Math.degToRad));
-    // 原代码将Cube旋转reorder为XYZ，逆过程需还原为原始欧拉角顺序（Format.euler_order）
-    rotation_euler.reorder(Format.euler_order);
-    cube.rotation.V3_set(
-        rotation_euler.toArray().map(r => Math.roundTo(Math.radToDeg(r), 4))
-    );
+                    // 遍历网格的所有面，按方向分类三角形
+                    // Iterate through all mesh faces and classify triangles by direction
+                    mesh.forAllFaces((face) => {
+                        const faceVkeys = face.vertices;
+                        const uniqueVkeys = [...new Set(faceVkeys)];
+                        if (uniqueVkeys.length < 3) return;
+                        
+                        const faceCoords = uniqueVkeys.map(vkey => mesh.vertices[vkey]).filter(c => c);
+                        if (faceCoords.length < 3) return;
 
-    // 3. 从Mesh顶点提取「调整后的from/to」（相对原点的坐标）
-    let verticesCoords = Object.values(mesh.vertices); // Mesh顶点是相对origin的坐标（原代码已减origin）
-    let [minX, maxX] = [Infinity, -Infinity];
-    let [minY, maxY] = [Infinity, -Infinity];
-    let [minZ, maxZ] = [Infinity, -Infinity];
+                        // 检测这个三角形属于哪个方向 / Detect which direction this triangle belongs to
+                        let direction = null;
+                        for (const [dir, detector] of Object.entries(faceDetectors)) {
+                            if (detector(faceCoords)) {
+                                direction = dir;
+                                break;
+                            }
+                        }
+                        if (!direction) return;
 
-    // 计算3轴极值（对应原代码的adjustedFrom和adjustedTo，相对origin）
-    verticesCoords.forEach(coord => {
-        minX = Math.min(minX, coord[0]);
-        maxX = Math.max(maxX, coord[0]);
-        minY = Math.min(minY, coord[1]);
-        maxY = Math.max(maxY, coord[1]);
-        minZ = Math.min(minZ, coord[2]);
-        maxZ = Math.max(maxZ, coord[2]);
-    });
+                        // 计算三角形面积，过滤退化三角形 / Calculate triangle area, filter degenerate triangles
+                        const area = triangleArea3D(faceCoords[0], faceCoords[1], faceCoords[2]);
+                        
+                        // 收集 UV 坐标（只保留面积 > 0 的三角形）
+                        // Collect UV coordinates (only keep triangles with area > 0)
+                        if (face.uv && area > EPSILON) {
+                            const triangleUVs = [];
+                            uniqueVkeys.forEach(vkey => {
+                                if (face.uv[vkey]) {
+                                    triangleUVs.push(face.uv[vkey].slice());
+                                }
+                            });
+                            
+                            if (triangleUVs.length >= 3) {
+                                faceTriangles[direction].push({
+                                    uvs: triangleUVs,
+                                    texture: face.texture,
+                                    area: area
+                                });
+                            }
+                        }
+                    });
 
-    // 相对origin的adjustedFrom和adjustedTo
-    let adjustedFrom_relative = [minX, minY, minZ];
-    let adjustedTo_relative = [maxX, maxY, maxZ];
+                    // 为每个方向计算最终的 UV 和纹理
+                    // Compute final UV and texture for each direction
+                    const computedFaces = {};
+                    
+                    for (const [direction, triangles] of Object.entries(faceTriangles)) {
+                        if (triangles.length === 0) {
+                            // 没有三角形，使用默认 UV / No triangles, use default UV
+                            computedFaces[direction] = {
+                                uv: [0, 0, 16, 16],
+                                texture: null,
+                                rotation: 0
+                            };
+                            continue;
+                        }
 
-    // 4. 还原世界空间的adjustedFrom和adjustedTo（反向原代码的「减origin」操作）
-    let adjustedFrom_world = adjustedFrom_relative.map((v, i) => v + cube.origin[i]);
-    let adjustedTo_world = adjustedTo_relative.map((v, i) => v + cube.origin[i]);
+                        // 按面积降序排序，选择最大的三角形（避免使用退化三角形的 UV）
+                        // Sort by area descending, select largest triangles (avoid using degenerate triangle UVs)
+                        triangles.sort((a, b) => b.area - a.area);
+                        
+                        let bestUVs = [];
+                        let bestTexture = null;
+                        
+                        // 取最多 2 个最大的三角形（一个 cube 面通常由 2 个三角形组成）
+                        // Take up to 2 largest triangles (a cube face is usually composed of 2 triangles)
+                        const maxTriangles = Math.min(triangles.length, 2);
+                        for (let i = 0; i < maxTriangles; i++) {
+                            bestUVs.push(...triangles[i].uvs);
+                            if (!bestTexture) bestTexture = triangles[i].texture;
+                        }
 
-    // 5. 调用正确的逆函数，还原Cube原始的from和to
-    inverseAdjustFromAndToForInflateAndStretch(adjustedFrom_world, adjustedTo_world, cube);
-    cube.from = adjustedFrom_world; // 逆函数直接修改入参，得到原始from
-    cube.to = adjustedTo_world;     // 逆函数直接修改入参，得到原始to
+                        if (bestUVs.length >= 3) {
+                            // 计算 UV 边界框 / Calculate UV bounding box
+                            const uValues = bestUVs.map(p => p[0]);
+                            const vValues = bestUVs.map(p => p[1]);
+                            
+                            const minU = Math.min(...uValues);
+                            const maxU = Math.max(...uValues);
+                            const minV = Math.min(...vValues);
+                            const maxV = Math.max(...vValues);
 
-    // 6. 还原6个面的属性（texture、uv、rotation）- 核心修正：遍历faces的方式
-    const directionDetectors = [
-        { name: 'east',  check: (coords) => coords.every(c => Math.abs(c[0] - maxX) < 1e-6) },
-        { name: 'west',  check: (coords) => coords.every(c => Math.abs(c[0] - minX) < 1e-6) },
-        { name: 'up',    check: (coords) => coords.every(c => Math.abs(c[1] - maxY) < 1e-6) },
-        { name: 'down',  check: (coords) => coords.every(c => Math.abs(c[1] - minY) < 1e-6) },
-        { name: 'south', check: (coords) => coords.every(c => Math.abs(c[2] - maxZ) < 1e-6) },
-        { name: 'north', check: (coords) => coords.every(c => Math.abs(c[2] - minZ) < 1e-6) }
-    ];
-	// 先收集所有三角形面，按方向分组（east/west/up/down/south/north）
-	const facesByDirection = {
-		east: [], west: [], up: [], down: [], south: [], north: []
-	};
+                            // 根据面的方向调整 UV 坐标顺序
+                            // Adjust UV coordinate order based on face direction
+                            let uv;
+                            switch (direction) {
+                                case 'north':
+                                case 'south':
+                                case 'east':
+                                case 'west':
+                                    uv = [minU, maxV, maxU, minV];
+                                    break;
+                                case 'up':
+                                case 'down':
+                                    uv = [minU, minV, maxU, maxV];
+                                    break;
+                                default:
+                                    uv = [minU, minV, maxU, maxV];
+                            }
 
-	// 遍历所有三角形面，按方向归类
-	mesh.forAllFaces((face, fkey) => {
-		const faceVkeys = face.vertices;
-		const faceCoords = faceVkeys.map(vkey => mesh.vertices[vkey]);
-		
-		// 匹配方向（和原逻辑一致，但收集三角形面）
-		const directionInfo = directionDetectors.find(det => det.check(faceCoords));
-		if (directionInfo) {
-			facesByDirection[directionInfo.name].push({ face, faceVkeys, faceCoords });
-		}
-	});
+                            computedFaces[direction] = {
+                                uv: uv,
+                                texture: bestTexture,
+                                rotation: 0
+                            };
+                        } else {
+                            computedFaces[direction] = {
+                                uv: [0, 0, 16, 16],
+                                texture: bestTexture,
+                                rotation: 0
+                            };
+                        }
+                    }
 
-	// 合并每个方向的2个三角形为1个矩形面（核心步骤）
-	const mergedRectFaces = {}; // 存储合并后的矩形面：{ east: { vertices: [], uv: {} }, ... }
+                    // 创建新的 Cube 元素（禁用 box_uv 和 autouv 以使用精确 UV）
+                    // Create new Cube element (disable box_uv and autouv to use precise UV)
+                    let cube = new Cube({
+                        name: mesh.name,
+                        color: mesh.color,
+                        origin: mesh.origin.slice(),
+                        rotation: mesh.rotation.slice(),
+                        box_uv: false,  // 禁用 box UV 模式 / Disable box UV mode
+                        autouv: 0,      // 禁用自动 UV / Disable auto UV
+                        from: [minX + mesh.origin[0], minY + mesh.origin[1], minZ + mesh.origin[2]],
+                        to: [maxX + mesh.origin[0], maxY + mesh.origin[1], maxZ + mesh.origin[2]],
+                        faces: {
+                            north: { 
+                                uv: computedFaces.north.uv, 
+                                texture: computedFaces.north.texture,
+                                rotation: 0
+                            },
+                            south: { 
+                                uv: computedFaces.south.uv, 
+                                texture: computedFaces.south.texture,
+                                rotation: 0
+                            },
+                            east: { 
+                                uv: computedFaces.east.uv, 
+                                texture: computedFaces.east.texture,
+                                rotation: 0
+                            },
+                            west: { 
+                                uv: computedFaces.west.uv, 
+                                texture: computedFaces.west.texture,
+                                rotation: 0
+                            },
+                            up: { 
+                                uv: computedFaces.up.uv, 
+                                texture: computedFaces.up.texture,
+                                rotation: 0
+                            },
+                            down: { 
+                                uv: computedFaces.down.uv, 
+                                texture: computedFaces.down.texture,
+                                rotation: 0
+                            }
+                        }
+                    });
 
-	Object.entries(facesByDirection).forEach(([direction, triFaces]) => {
-		if (triFaces.length !== 2) return; // 按规则，每个方向必是2个三角形，跳过异常情况
-		const [tri1, tri2] = triFaces;
+                    // 插入到原 mesh 位置，并移除原 mesh / Insert at original mesh position and remove mesh
+                    cube.sortInBefore(mesh).init();
+                    new_cubes.push(cube);
+                    selected.push(cube);
+                    mesh.remove();
+                });
 
-		// 🔍 找到两个三角形的共享边（相同的顶点key交集）
-		const tri1VkeysSet = new Set(tri1.faceVkeys);
-		const sharedVkeys = tri2.faceVkeys.filter(vkey => tri1VkeysSet.has(vkey));
-		if (sharedVkeys.length !== 2) return; // 共享边必须是2个顶点，确保是同一个矩形拆的
+                // 完成撤销操作并更新视图 / Finish undo operation and update view
+                Undo.finishEdit('Convert elements to cubes', { elements: new_cubes, outliner: true });
+                Canvas.updateView({ elements: Mesh.selected, element_aspects: { geometry: true, transform: true }, selection: true });
+                Canvas.updateView({ elements: new_cubes, element_aspects: { geometry: true, transform: true }, selection: true });
+                updateSelection();
+            }
+        });
 
-		// 🔍 合并4个不重复的顶点（矩形的4个顶点）
-		const allVkeys = [...new Set([...tri1.faceVkeys, ...tri2.faceVkeys])];
-		if (allVkeys.length !== 4) return;
-
-		// 提取顶点坐标（用于判断方向）
-		const getVertexCoord = (vkey) => mesh.vertices[vkey];
-		const A = getVertexCoord(allVkeys[0]);
-		const B = getVertexCoord(allVkeys[1]);
-		const C = getVertexCoord(allVkeys[2]);
-
-		// 顶点顺序严格逆时针验证（保留之前的修复，确保面方向正确）
-		let orderedVkeys;
-		switch (direction) {
-			case 'east': case 'west':
-				const crossProduct_YZ = (B[1] - A[1]) * (C[2] - A[2]) - (B[2] - A[2]) * (C[1] - A[1]);
-				orderedVkeys = crossProduct_YZ < 0 ? [allVkeys[0], allVkeys[2], allVkeys[1], allVkeys[3]] : allVkeys;
-				break;
-			case 'up': case 'down':
-				const crossProduct_XZ = (B[0] - A[0]) * (C[2] - A[2]) - (B[2] - A[2]) * (C[0] - A[0]);
-				orderedVkeys = crossProduct_XZ < 0 ? [allVkeys[0], allVkeys[2], allVkeys[1], allVkeys[3]] : allVkeys;
-				break;
-			case 'south': case 'north':
-				const crossProduct_XY = (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0]);
-				orderedVkeys = crossProduct_XY < 0 ? [allVkeys[0], allVkeys[2], allVkeys[1], allVkeys[3]] : allVkeys;
-				break;
-		}
-
-		// 🔍 合并UV数据（两个三角形的UV合并为矩形的4个顶点UV）
-		const mergedUv = {};
-		Object.assign(mergedUv, tri1.face.uv, tri2.face.uv); // 两个三角形的UV合并（无冲突，因顶点不重复）
-
-		// 存储合并后的矩形面
-		mergedRectFaces[direction] = {
-			vkeys: orderedVkeys,
-			uv: mergedUv,
-			texture: tri1.face.texture, // 两个三角形纹理相同，取任意一个
-			rotation: tri1.face.rotation // 两个三角形旋转相同，取任意一个
-		};
-	});
-	// 遍历合并后的矩形面，还原Cube的6个面属性
-	Object.entries(mergedRectFaces).forEach(([direction, rectFace]) => {
-		const cubeFace = cube.faces[direction];
-		const { vkeys, uv, texture } = rectFace;
-
-		// 1. 还原纹理（和原逻辑一致）
-		cubeFace.texture = texture;
-
-		// 2. 提取4个顶点的UV（此时vkeys是4个，无undefined）
-		const uvPoints = vkeys.map(vkey => uv[vkey]);
-
-		// 3. 修复UV范围计算（取真正的min/max，解决边长错误）
-		const uValues = uvPoints.map(p => p[0]);
-		const vValues = uvPoints.map(p => p[1]);
-		cubeFace.uv = [
-			Math.min(...uValues), // 真正的minU
-			Math.min(...vValues), // 真正的minV
-			Math.max(...uValues), // 真正的maxU
-			Math.max(...vValues)  // 真正的maxV
-		];
-
-		if (direction === 'up' || direction === 'down') {
-			// 交换 minU 和 maxU，实现 X 轴翻转（仅作用于面向竖直方向的纹理）
-			cubeFace.uv = [cubeFace.uv[2], cubeFace.uv[1], cubeFace.uv[0], cubeFace.uv[3]];
-		} else {
-			// 交换 minV 和 maxV，实现 Y 轴翻转（仅作用于面向水平方向的纹理）
-			cubeFace.uv = [cubeFace.uv[0], cubeFace.uv[3], cubeFace.uv[2], cubeFace.uv[1]];
-		}
-
-		const originalUvPoints = [
-			[cubeFace.uv[0], cubeFace.uv[1]],
-			[cubeFace.uv[2], cubeFace.uv[1]],
-			[cubeFace.uv[2], cubeFace.uv[3]],
-			[cubeFace.uv[0], cubeFace.uv[3]]
-		];
-
-		let rotationSteps = 0;
-		while (rotationSteps < 4) {
-			const rotated = [...originalUvPoints];
-			rotated.push(rotated.shift()); // 顺时针旋转（符合 BlockBench 规则）
-			const isMatch = rotated.every((p, idx) => 
-				Math.abs(p[0] - uvPoints[idx][0]) < 1e-6 && 
-				Math.abs(p[1] - uvPoints[idx][1]) < 1e-6
-			);
-			if (isMatch) break;
-			rotationSteps++;
-		}
-		cubeFace.rotation = (rotationSteps * 90) % 360;
-	});
-
-	
-    // 7. 替换Mesh为Cube（保持层级和选择状态，与原代码逻辑一致）
-    cube.sortInBefore(mesh).init();
-    new_cubes.push(cube);
-    selected.push(cube);
-    mesh.remove();
+        // 添加到菜单 / Add to menu
+        MenuBar.addAction(convert_button, 'mesh');
+        var meshMenu = Mesh.prototype.menu.structure;
+        var index = meshMenu.indexOf("apply_mesh_rotation");
+        meshMenu.splice(index + 1, 0, convert_button.id);
+    },
+    onunload() {
+        convert_button.delete();
+    }
 });
-
-
-///////////////// LLM generate end ////////////////////
-
-
-				Undo.finishEdit('Convert elements to cubes', {elements: new_cubes, outliner: true});
-				Canvas.updateView({elements: Mesh.selected, element_aspects: {geometry: true, transform: true}, selection: true})
-				Canvas.updateView({elements: new_cubes, element_aspects: {geometry: true, transform: true}, selection: true})
-				updateSelection();
-			}
-		})
-
-		MenuBar.addAction(convert_button, 'mesh')
-		var meshMenu = Mesh.prototype.menu.structure
-		var index = meshMenu.indexOf("apply_mesh_rotation")
-		meshMenu.splice(index + 1, 0, convert_button.id)
-	},
-	onunload() {
-		convert_button.delete()
-	}
-})
