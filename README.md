@@ -6,9 +6,21 @@ BlockBench plugin that helps you convert `mesh` back to `cube`.
 
 ![screenshot1](assets/screenshot1.webp)
 
-只需要选中网格，右键，点击“转换成块”，即可将网格转换回块！
 
-Just select meshes, right click, and click "Convert to Cube". That's it!
+## 使用方法 / Usage
+
+1. **加载插件 / Load Plugin**
+   - File → Plugins → Load Plugin from File
+   - 选择 `convert_mesh_to_cube.js` / Select `convert_mesh_to_cube.js`
+
+2. **转换网格 / Convert Meshes**
+   - 选中网格 / Select meshes (Ctrl+A 全选 / select all)
+   - 右键 → Convert to Cube / Right click → Convert to Cube
+   - 或者 / Or: Mesh 菜单 → Convert to Cube
+
+3. **重新加载插件 / Reload Plugin** (更新后 / After updates)
+   - 卸载旧版本 / Uninstall old version: File → Plugins → "Convert Mesh to Cube" → Uninstall
+   - 重新加载 / Reload: File → Plugins → Load Plugin from File
 
 > [!WARNING]
 > 
